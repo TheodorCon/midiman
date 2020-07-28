@@ -36,20 +36,71 @@ data SysexEvent = F0 String --F0 <length> <sysex_data>
                 | F7 String --F7 <length> <any_data>
 
 data MetaEvent = SeqNum Int -- FF 00 02 ss ss
-               | Text Int String --
-               | Copyright Int String --
-               | SeqName Int String --
-               | Instrument Int String --
-               | Lyric Int String --
-               | Marker Int String --
-               | CuePoint Int String --
-               | ChanPref Int --
-               | TrackEnd --
-               | Tempo Int --
-               | SMTPEOffset Int Int Int Int Float --
+               | Text String --FF 01 <len> <text>
+               | Copyright String --FF 02 <len> <text>
+               | SeqName String --FF 03 <len> <text>
+               | Instrument String --FF 04 <len> <text>
+               | Lyric String --FF 05 <len> <text>
+               | Marker String --FF 06 <len> <text>
+               | CuePoint String --FF 07 <len> <text>
+               | ChanPref Int --FF 20 01 cc
+               | TrackEnd --FF 2F 00
+               | Tempo Int --FF 51 03 tt tt tt
+               | SMTPEOffset Int Int Int Int Float --FF 54 05 hh mm ss fr ff
                | TimeSign Int Int Int Int --
                | KeySign Int Bool --
                | SeqSpec Int String String --
+
+bsSeqNum :: BSParser MetaEvent 
+bsSeqNum = (SeqNum . strToInt) <$> (bsHexString "FF 00 02" *> bsMultiChar 2)
+
+bsText :: BSParser MetaEvent
+bsText = Text <$> (bsHexString "FF 01" *> bsVarStr 1) 
+
+bsCopyright :: BSParser MetaEvent
+bsCopyright = Copyright <$> (bsHexString "FF 02" *> bsVarStr 1) 
+
+bsSeqName :: BSParser MetaEvent
+bsSeqName = SeqName <$> (bsHexString "FF 03" *> bsVarStr 1) 
+
+bsInstrument :: BSParser MetaEvent
+bsInstrument = Instrument <$> (bsHexString "FF 04" *> bsVarStr 1) 
+
+bsLyric :: BSParser MetaEvent
+bsLyric = Lyric <$> (bsHexString "FF 05" *> bsVarStr 1) 
+
+bsMarker :: BSParser MetaEvent
+bsMarker = Marker <$> (bsHexString "FF 06" *> bsVarStr 1) 
+
+bsCuePoint :: BSParser MetaEvent
+bsCuePoint = CuePoint <$> (bsHexString "FF 07" *> bsVarStr 1) 
+
+bsChanPref :: BSParser MetaEvent
+bsChanPref = ChanPref <$> (bsHexString "FF 20 01" *> bsInt 1)
+
+bsTrackEnd :: BSParser MetaEvent
+bsTrackEnd = (const TrackEnd) <$> bsHexString "FF 2F 00" 
+
+bsTempo :: BSParser MetaEvent
+bsTempo = Tempo <$> (bsHexString "FF 51 03" *> bsInt 1)
+
+bsSMTPE :: BSParser MetaEvent
+bsSMTPE = SMTPEOffset <$> (bsHexString "FF 54 05" *> bsInt 1) 
+                      <*> bsInt 1
+                      <*> bsInt 1
+                      <*> bsInt 1
+                      <*> ((\i -> (fromIntegral i) / 100) <$> bsInt 1)
+
+bsVarStr :: Int -> BSParser String 
+bsVarStr lenChars = BSParser prs where
+    prs str = let lengthResult = run (bsMultiChar lenChars) str in
+        case lengthResult of
+            Nothing -> Nothing
+            Just (lengthString, rest) -> let length = strToInt lengthString in
+                run (bsMultiChar length) rest
+
+bsInt :: Int -> BSParser Int
+bsInt len = strToInt <$> bsMultiChar len
 
 data ChannelVoiceEvent = NoteOff Int Int Int
                        | PolyKeyPress Int Int Int
