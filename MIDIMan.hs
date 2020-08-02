@@ -51,12 +51,13 @@ data MetaEvent = SeqNum Int -- FF 00 02 ss ss
                | KeySign Int Bool --FF 59 02 sf mi
                | SeqSpec String String --FF 7F <len> <id> <data>
 
-data ChannelVoiceEvent = NoteOff Int Int Int -- 
-                       | PolyKeyPress Int Int Int
-                       | CtrlChange Int Int Int
-                       | PrgChange Int Int Int
-                       | ChanKeyPress Int Int Int
-                       | PitchBend Int Int Int
+data ChannelVoiceEvent = NoteOff Int Int Int -- 8n kk vv 
+                       | NoteOn Int Int Int -- 9n kk vv
+                       | PolyKeyPress Int Int Int  -- An kk ww
+                       | CtrlChange Int Int Int -- Bn cc nn
+                       | ProgChange Int Int -- Cn pp
+                       | ChanKeyPress Int Int -- Dn ww
+                       | PitchBend Int Int Int -- En <lsb> <msb>
 
 data ChannelModeEvent = AllSoundOff Int
                       | ResetCtrls Int
@@ -98,6 +99,10 @@ repeatParser :: BSParser a -> BSParser [a]
 repeatParser parser = toList <$> parser <*> (repeatParser parser) 
     <|> (\el -> [el]) <$> parser where 
         toList el list = el : list
+
+allParser :: [BSParser a] -> BSParser a
+allParser (p:[]) = p
+allParser (p:ps) = p <|> allParser ps
 
 bsChar :: Char -> BSParser Char
 bsChar ch = BSParser prs where
@@ -254,6 +259,42 @@ bsSeqSpec = toSeqSpec <$> (bsHexString "FF 7F" *> bsVarStr 1) where
 bsMIDI :: BSParser MIDI
 bsMIDI = func <$> bsMThd <*> (repeatParser bsMTrk) where
         func td rk = MIDI td rk
+
+-- Channel Voice Events
+
+bsVoiceEvent :: BSParser ChannelVoiceEvent
+bsVoiceEvent = bsNoteOff
+           <|> bsNoteOn
+           <|> bsPolyKeyPress
+           <|> bsCtrlChange
+           <|> bsProgChange
+           <|> bsChanKeyPress
+           <|> bsPitchBend
+
+bsNoteOff :: BSParser ChannelVoiceEvent
+bsNoteOff = NoteOff <$> bsStatusByte "8" <*> bsInt 1 <*> bsInt 1
+
+bsNoteOn :: BSParser ChannelVoiceEvent
+bsNoteOn = NoteOn <$> bsStatusByte "9" <*> bsInt 1 <*> bsInt 1
+
+bsPolyKeyPress :: BSParser ChannelVoiceEvent
+bsPolyKeyPress = PolyKeyPress <$> bsStatusByte "A" <*> bsInt 1 <*> bsInt 1
+
+bsCtrlChange :: BSParser ChannelVoiceEvent
+bsCtrlChange = CtrlChange <$> bsStatusByte "B" <*> bsInt 1 <*> bsInt 1
+
+bsProgChange :: BSParser ChannelVoiceEvent
+bsProgChange = ProgChange <$> bsStatusByte "C" <*> bsInt 1
+
+bsChanKeyPress :: BSParser ChannelVoiceEvent
+bsChanKeyPress = ChanKeyPress <$> bsStatusByte "D" <*> bsInt 1
+
+bsPitchBend :: BSParser ChannelVoiceEvent
+bsPitchBend = PitchBend <$> bsStatusByte "E" <*> bsInt 1 <*> bsInt 1
+
+bsStatusByte :: String -> BSParser Int
+bsStatusByte prefix = toInt <$> (allParser (map (\int -> bsHexString (prefix ++ (showHex int ""))) [0..15])) where
+    toInt (_:hex:[]) = fst . head . readHex $ [hex]
 
 -- Utilites
 
