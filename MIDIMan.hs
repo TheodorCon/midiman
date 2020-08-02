@@ -4,6 +4,7 @@ import System.IO
 
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal
+import qualified Data.ByteString.Char8 as BSC
 import Data.Word
 import Data.Binary
 import Data.Char
@@ -12,6 +13,12 @@ import Control.Applicative
 import Numeric (showHex, readHex)
 
 main = readMidiFile "John Denver - Take Me Home Country Roads.mid"
+
+readMidiFile :: FilePath -> IO (Maybe (MIDI, ByteString))
+readMidiFile filePath = do 
+    s <- BS.readFile filePath
+    let result = run bsMIDI s in
+        return result
 
 data MIDI = MIDI MThdChunk [MTrkChunk]
     deriving (Eq, Show)
@@ -24,16 +31,18 @@ type TracksHD = Int
 data Division = TickPerQN Int | TicksFrameSeconds Int Int
     deriving (Eq, Show)
 
-data MTrkChunk = MTrk Int String String
+data MTrkChunk = MTrk [(Int, Event)]
     deriving (Eq, Show)
 
-data Event = Sysex SysexEvent 
-           | Meta MetaEvent 
-           | Mode ChannelModeEvent 
+data Event = Sysex SysexEvent
+           | Meta MetaEvent
+           | Mode ChannelModeEvent
            | Voice ChannelVoiceEvent
+    deriving (Eq, Show)
 
 data SysexEvent = F0 String --F0 <length> <sysex_data>
                 | F7 String --F7 <length> <any_data>
+    deriving (Eq, Show)
 
 data MetaEvent = SeqNum Int -- FF 00 02 ss ss
                | Text String --FF 01 <len> <text>
@@ -43,13 +52,17 @@ data MetaEvent = SeqNum Int -- FF 00 02 ss ss
                | Lyric String --FF 05 <len> <text>
                | Marker String --FF 06 <len> <text>
                | CuePoint String --FF 07 <len> <text>
+               | ProgName String --FF 08 <len> <text> TODO
+               | DeviceName String --FF 09 <len> <text> TODO
                | ChanPref Int --FF 20 01 cc
+               | MIDIPort Int --FF 21 01 pp
                | TrackEnd --FF 2F 00
                | Tempo Int --FF 51 03 tt tt tt
                | SMTPEOffset Int Int Int Int Float --FF 54 05 hh mm ss fr ff
                | TimeSign Int Int Int Int --FF 58 04 nn dd cc bb
                | KeySign Int Bool --FF 59 02 sf mi
                | SeqSpec String String --FF 7F <len> <id> <data>
+    deriving (Eq, Show)
 
 data ChannelVoiceEvent = NoteOff Int Int Int -- 8n kk vv 
                        | NoteOn Int Int Int -- 9n kk vv
@@ -58,6 +71,7 @@ data ChannelVoiceEvent = NoteOff Int Int Int -- 8n kk vv
                        | ProgChange Int Int -- Cn pp
                        | ChanKeyPress Int Int -- Dn ww
                        | PitchBend Int Int Int -- En <lsb> <msb>
+    deriving (Eq, Show)
 
 data ChannelModeEvent = AllSoundOff Int -- Bn 78 00
                       | ResetCtrls Int -- Bn 79 00
@@ -67,12 +81,7 @@ data ChannelModeEvent = AllSoundOff Int -- Bn 78 00
                       | OmniOn Int -- Bn 7D 00
                       | MonoOn Int Int -- Bn 7E m
                       | PolyOn Int -- Bn 7F 00
-
--- readMidiFile :: FilePath -> IO (MIDI)
-readMidiFile filePath = do 
-    s <- BS.readFile filePath
-    let Just (MIDI hd ((MTrk _ _ _):(MTrk _ a b):rks), _) = run bsMIDI s in
-        return $ foldl (\acc y -> acc ++ y ++ " ") "" $ map (\c -> ((\s -> if length s == 1 then '0' : s else s) . (map toUpper) . (flip showHex "") . strToInt) [c]) (a ++ b)
+    deriving (Eq, Show)
 
 newtype BSParser a = BSParser { run :: ByteString -> Maybe (a, ByteString) }
 -- data BSParser a = BSParser (ByteString -> Maybe (a, ByteString))
@@ -140,7 +149,8 @@ bsInt len = strToInt <$> bsMultiChar len
 
 bsStatusByte :: String -> BSParser Int
 bsStatusByte prefix = toInt <$> (allParser (map (\int -> bsHexString (prefix ++ (showHex int ""))) [0..15])) where
-    toInt (_:hex:[]) = fst . head . readHex $ [hex]
+    toInt (hex:[]) = mod (ord hex) 128
+    toInt _ = error "This should not have happened. The string returned by all parser was too long."
 
 bsMThd :: BSParser MThdChunk
 bsMThd = func <$> (bsString "MThd" 
@@ -158,24 +168,31 @@ bsMThd = func <$> (bsString "MThd"
                     else TickPerQN (div asInt 2)
 
 bsMTrk :: BSParser MTrkChunk
-bsMTrk = func <$> (bsString "MTrk" 
-     *> (BSParser (\str -> if BS.null str 
-        then Nothing
-        else case run (bsMultiChar 4) str of 
-            Nothing -> Nothing
-            Just (strInt, restA) -> let times = strToInt strInt in
-                case run (bsMultiChar times) restA of
-                    Nothing -> Nothing
-                    Just (dataString, restB) -> Just ((times, dataString), restB)))) where
-                func (times, dataString) = let (delta, event) = splitString dataString "" in 
-                    MTrk times delta event where
-                        splitString (x:xs) acc = if strToInt [x] < 128 
-                            then (acc ++ [x], xs)
-                            else splitString xs (acc ++ [x])
+bsMTrk = (MTrk . toEventList) <$> (bsString "MTrk" *> bsVarStr 4) where
+    toEventList str = handleResult (run (repeatParser deltaEventPrs) (BSC.pack str)) where
+        handleResult Nothing = error (show str)
+        handleResult (Just (events, rest)) = if BS.null rest 
+            then events
+            else error ((show events) ++ "\n\n" ++ (stringToHexString str))
+        deltaEventPrs = toEventPair <$> deltaPrs <*> bsEvent where
+            toEventPair str event = (strToInt str, event)
+            deltaPrs = singleFunc <$> bsStatusByte "0"
+                   <|> endFunc <$> bsAnyChar <*> bsStatusByte "0"
+                   <|> midFunc <$> bsAnyChar <*> deltaPrs where
+                       singleFunc int = ("0" ++ (showHex int ""))
+                       endFunc ch int = ch : ("0" ++ (showHex int ""))
+                       midFunc ch str = ch : str
+
 
 bsMIDI :: BSParser MIDI
 bsMIDI = func <$> bsMThd <*> (repeatParser bsMTrk) where
         func td rk = MIDI td rk
+
+bsEvent :: BSParser Event
+bsEvent = Sysex <$> bsSysex
+      <|> Meta <$> bsMeta
+      <|> Mode <$> bsMode
+      <|> Voice <$> bsVoice
 
 -- Sysex Events
 
@@ -199,6 +216,7 @@ bsMeta = bsSeqNum
      <|> bsMarker
      <|> bsCuePoint
      <|> bsChanPref
+     <|> bsMIDIPort
      <|> bsTrackEnd
      <|> bsTempo
      <|> bsSMTPE
@@ -233,6 +251,9 @@ bsCuePoint = CuePoint <$> (bsHexString "FF 07" *> bsVarStr 1)
 bsChanPref :: BSParser MetaEvent
 bsChanPref = ChanPref <$> (bsHexString "FF 20 01" *> bsInt 1)
 
+bsMIDIPort :: BSParser MetaEvent
+bsMIDIPort = MIDIPort <$> (bsHexString "FF 21 01" *> bsInt 1)
+
 bsTrackEnd :: BSParser MetaEvent
 bsTrackEnd = (const TrackEnd) <$> bsHexString "FF 2F 00" 
 
@@ -266,8 +287,8 @@ bsSeqSpec = toSeqSpec <$> (bsHexString "FF 7F" *> bsVarStr 1) where
 
 -- Channel Voice Events
 
-bsVoiceEvent :: BSParser ChannelVoiceEvent
-bsVoiceEvent = NoteOff <$> bsStatusByte "8" <*> bsInt 1 <*> bsInt 1
+bsVoice :: BSParser ChannelVoiceEvent
+bsVoice = NoteOff <$> bsStatusByte "8" <*> bsInt 1 <*> bsInt 1
            <|> NoteOn <$> bsStatusByte "9" <*> bsInt 1 <*> bsInt 1
            <|> PolyKeyPress <$> bsStatusByte "A" <*> bsInt 1 <*> bsInt 1
            <|> CtrlChange <$> bsStatusByte "B" <*> bsInt 1 <*> bsInt 1
@@ -277,8 +298,8 @@ bsVoiceEvent = NoteOff <$> bsStatusByte "8" <*> bsInt 1 <*> bsInt 1
 
 -- Channel Mode Events
 
-bsModeEvent :: BSParser ChannelModeEvent
-bsModeEvent = AllSoundOff <$> (bsStatusByte "B" <* bsHexString "78 00")
+bsMode :: BSParser ChannelModeEvent
+bsMode = AllSoundOff <$> (bsStatusByte "B" <* bsHexString "78 00")
           <|> ResetCtrls <$> (bsStatusByte "B" <* bsHexString "79 00")
           <|> LocalCtrl <$> bsStatusByte "B" <*> (bsHexString "7A" *> bsInt 1) 
           <|> AllNotesOff <$> (bsStatusByte "B" <* bsHexString "7B 00")
@@ -300,3 +321,14 @@ hexStringToCharString str =  let separate = words str
                                  numbers = map (fst . handleErr . (!! 0) . readHex) separate 
                                  byteChars = map chr numbers in 
     byteChars
+
+stringToHexString :: String -> String
+stringToHexString bs = foldl flatten "" (map (prettify . ((flip showHex) "") . ord) bs) where
+    prettify (a:[]) = "0" ++ [a]
+    prettify res = res
+    flatten a b = a ++ " " ++ b
+byteToHexString :: ByteString -> String
+byteToHexString bs = foldl flatten "" (map (prettify . ((flip showHex) "") . ord . w2c) (BS.unpack bs)) where
+    prettify (a:[]) = "0" ++ [a]
+    prettify res = res
+    flatten a b = a ++ " " ++ b
