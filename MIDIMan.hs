@@ -59,14 +59,14 @@ data ChannelVoiceEvent = NoteOff Int Int Int -- 8n kk vv
                        | ChanKeyPress Int Int -- Dn ww
                        | PitchBend Int Int Int -- En <lsb> <msb>
 
-data ChannelModeEvent = AllSoundOff Int
-                      | ResetCtrls Int
-                      | LocalCtrl Int Int
-                      | AllNotesOff Int
-                      | OmniOff Int
-                      | OmniOn Int
-                      | MonoOn Int Int 
-                      | PolyOn Int
+data ChannelModeEvent = AllSoundOff Int -- Bn 78 00
+                      | ResetCtrls Int -- Bn 79 00
+                      | LocalCtrl Int Int -- Bn 7A xx
+                      | AllNotesOff Int -- Bn 7B 00
+                      | OmniOff Int -- Bn 7C 00
+                      | OmniOn Int -- Bn 7D 00
+                      | MonoOn Int Int -- Bn 7E m
+                      | PolyOn Int -- Bn 7F 00
 
 -- readMidiFile :: FilePath -> IO (MIDI)
 readMidiFile filePath = do 
@@ -138,6 +138,10 @@ bsVarStr lenChars = BSParser prs where
 bsInt :: Int -> BSParser Int
 bsInt len = strToInt <$> bsMultiChar len
 
+bsStatusByte :: String -> BSParser Int
+bsStatusByte prefix = toInt <$> (allParser (map (\int -> bsHexString (prefix ++ (showHex int ""))) [0..15])) where
+    toInt (_:hex:[]) = fst . head . readHex $ [hex]
+
 bsMThd :: BSParser MThdChunk
 bsMThd = func <$> (bsString "MThd" 
      *> (bsMultiChar 4))
@@ -168,6 +172,10 @@ bsMTrk = func <$> (bsString "MTrk"
                         splitString (x:xs) acc = if strToInt [x] < 128 
                             then (acc ++ [x], xs)
                             else splitString xs (acc ++ [x])
+
+bsMIDI :: BSParser MIDI
+bsMIDI = func <$> bsMThd <*> (repeatParser bsMTrk) where
+        func td rk = MIDI td rk
 
 -- Sysex Events
 
@@ -256,45 +264,28 @@ bsSeqSpec :: BSParser MetaEvent
 bsSeqSpec = toSeqSpec <$> (bsHexString "FF 7F" *> bsVarStr 1) where
     toSeqSpec (x:xs) = SeqSpec [x] xs
 
-bsMIDI :: BSParser MIDI
-bsMIDI = func <$> bsMThd <*> (repeatParser bsMTrk) where
-        func td rk = MIDI td rk
-
 -- Channel Voice Events
 
 bsVoiceEvent :: BSParser ChannelVoiceEvent
-bsVoiceEvent = bsNoteOff
-           <|> bsNoteOn
-           <|> bsPolyKeyPress
-           <|> bsCtrlChange
-           <|> bsProgChange
-           <|> bsChanKeyPress
-           <|> bsPitchBend
+bsVoiceEvent = NoteOff <$> bsStatusByte "8" <*> bsInt 1 <*> bsInt 1
+           <|> NoteOn <$> bsStatusByte "9" <*> bsInt 1 <*> bsInt 1
+           <|> PolyKeyPress <$> bsStatusByte "A" <*> bsInt 1 <*> bsInt 1
+           <|> CtrlChange <$> bsStatusByte "B" <*> bsInt 1 <*> bsInt 1
+           <|> ProgChange <$> bsStatusByte "C" <*> bsInt 1
+           <|> ChanKeyPress <$> bsStatusByte "D" <*> bsInt 1
+           <|> PitchBend <$> bsStatusByte "E" <*> bsInt 1 <*> bsInt 1
 
-bsNoteOff :: BSParser ChannelVoiceEvent
-bsNoteOff = NoteOff <$> bsStatusByte "8" <*> bsInt 1 <*> bsInt 1
+-- Channel Mode Events
 
-bsNoteOn :: BSParser ChannelVoiceEvent
-bsNoteOn = NoteOn <$> bsStatusByte "9" <*> bsInt 1 <*> bsInt 1
-
-bsPolyKeyPress :: BSParser ChannelVoiceEvent
-bsPolyKeyPress = PolyKeyPress <$> bsStatusByte "A" <*> bsInt 1 <*> bsInt 1
-
-bsCtrlChange :: BSParser ChannelVoiceEvent
-bsCtrlChange = CtrlChange <$> bsStatusByte "B" <*> bsInt 1 <*> bsInt 1
-
-bsProgChange :: BSParser ChannelVoiceEvent
-bsProgChange = ProgChange <$> bsStatusByte "C" <*> bsInt 1
-
-bsChanKeyPress :: BSParser ChannelVoiceEvent
-bsChanKeyPress = ChanKeyPress <$> bsStatusByte "D" <*> bsInt 1
-
-bsPitchBend :: BSParser ChannelVoiceEvent
-bsPitchBend = PitchBend <$> bsStatusByte "E" <*> bsInt 1 <*> bsInt 1
-
-bsStatusByte :: String -> BSParser Int
-bsStatusByte prefix = toInt <$> (allParser (map (\int -> bsHexString (prefix ++ (showHex int ""))) [0..15])) where
-    toInt (_:hex:[]) = fst . head . readHex $ [hex]
+bsModeEvent :: BSParser ChannelModeEvent
+bsModeEvent = AllSoundOff <$> (bsStatusByte "B" <* bsHexString "78 00")
+          <|> ResetCtrls <$> (bsStatusByte "B" <* bsHexString "79 00")
+          <|> LocalCtrl <$> bsStatusByte "B" <*> (bsHexString "7A" *> bsInt 1) 
+          <|> AllNotesOff <$> (bsStatusByte "B" <* bsHexString "7B 00")
+          <|> OmniOff <$> (bsStatusByte "B" <* bsHexString "7C 00")
+          <|> OmniOn <$> (bsStatusByte "B" <* bsHexString "7D 00")
+          <|> MonoOn <$>  bsStatusByte "B" <*> (bsHexString "7E" *> bsInt 1)
+          <|> PolyOn <$> (bsStatusByte "B" <* bsHexString "7F 00")
 
 -- Utilites
 
